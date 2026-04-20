@@ -32,9 +32,12 @@ from ml_quality import (
     compute_shap_explanations, explain_single_prediction,
     detect_data_drift, simulate_drift_scenario,
 )
-from monte_carlo import run_monte_carlo
-from evm import compute_evm
 from crashing import compute_crash_tradeoff
+from construction_pm import (
+    compute_float_analysis, generate_boq, boq_summary,
+    compute_cash_flow, compute_equipment_utilization,
+    compute_payment_schedule,
+)
 from visualizations import (
     create_gantt_chart_bar,
     create_resource_heatmap,
@@ -52,12 +55,14 @@ from visualizations import (
     create_shap_bar_chart,
     create_shap_waterfall,
     create_drift_chart,
-    create_monte_carlo_histogram,
-    create_criticality_chart,
-    create_evm_scurve,
     create_crash_tradeoff_chart,
     create_dag_chart,
     create_map_view,
+    create_float_chart,
+    create_cash_flow_chart,
+    create_equipment_utilization_chart,
+    create_boq_cost_chart,
+    create_payment_chart,
 )
 
 # ─── Page Config ─────────────────────────────────────────────────────
@@ -130,9 +135,6 @@ with st.sidebar:
         format_func=lambda k: SCENARIO_LIBRARY[k].name,
     )
 
-    st.subheader("📈 EVM Settings")
-    evm_progress = st.slider("Simulated Progress %", 10, 90, 50, 5)
-    evm_cost_var = st.slider("Cost Variance Factor", 0.90, 1.20, 1.05, 0.01)
 
     st.subheader("📤 Data Import")
     uploaded_file = st.file_uploader("Upload Task CSV", type=["csv"])
@@ -186,10 +188,11 @@ if run_btn or "schedule" in st.session_state:
         )
 
     # ─── Dashboard Tabs ─────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab_ml, tab5, tab6, tab7, tab_mc, tab_evm, tab_crash, tab_map, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab_ml, tab5, tab6, tab7, tab_float, tab_boq, tab_cf, tab_equip, tab_pay, tab_crash, tab_map, tab8 = st.tabs([
         "📊 Schedule", "🔧 Resources", "💰 Cost", "🤖 AI Risk",
         "🧪 ML Quality", "🌦️ Live Data", "📏 Constraints", "🔬 Simulator",
-        "🎲 Monte Carlo", "📈 EVM", "⚡ Crashing", "🗺️ Map", "📋 Data",
+        "⏳ Float", "🧱 BOQ", "💸 Cash Flow", "🚜 Equip", "💳 Payments",
+        "⚡ Crashing", "🗺️ Map", "📋 Data",
     ])
 
     # ── Tab 1: Schedule ──────────────────────────────────────────────
@@ -565,63 +568,74 @@ if run_btn or "schedule" in st.session_state:
                 })
             st.dataframe(pd.DataFrame(lib_data), use_container_width=True, hide_index=True)
 
-    # ── Tab: Monte Carlo Simulation ────────────────────────────────────
-    with tab_mc:
-        st.subheader("🎲 Monte Carlo Probabilistic Scheduling")
-        st.markdown("PERT-distributed durations × 1,000 simulations → confidence intervals.")
 
-        mc_sims = st.select_slider("Simulations", [500, 1000, 2000, 5000], value=1000)
-        with st.spinner(f"Running {mc_sims} Monte Carlo simulations..."):
-            mc = run_monte_carlo(n_simulations=mc_sims)
+    # ── Tab: Float Analysis ──────────────────────────────────────────
+    with tab_float:
+        st.subheader("⏳ Float / Slack Analysis")
+        st.markdown("Identify schedule flexibility and near-critical tasks.")
+        float_df = compute_float_analysis(tasks, result["schedule"])
+        st.plotly_chart(create_float_chart(float_df), use_container_width=True)
+        st.dataframe(float_df, use_container_width=True, hide_index=True)
 
-        p = mc["percentiles"]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("P50 (Median)", f"{p['P50']} weeks")
-        c2.metric("P80", f"{p['P80']} weeks")
-        c3.metric("P90", f"{p['P90']} weeks")
-        c4.metric("Mean ± Std", f"{p['Mean']} ± {p['Std']}")
+    # ── Tab: BOQ ──────────────────────────────────────────────────────
+    with tab_boq:
+        st.subheader("🧱 Bill of Quantities (BOQ)")
+        boq_df = generate_boq(tasks)
+        boq_stats = boq_summary(boq_df)
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Material Cost", f"₹{boq_stats['total_material_cost']:,.0f}")
+        c2.metric("Unique Materials", boq_stats["unique_materials"])
+        c3.metric("Tasks with Materials", boq_stats["tasks_with_materials"])
+        
+        st.plotly_chart(create_boq_cost_chart(boq_df), use_container_width=True)
+        st.dataframe(boq_df, use_container_width=True, hide_index=True)
 
-        st.plotly_chart(create_monte_carlo_histogram(mc["makespans"], p), use_container_width=True)
-        st.plotly_chart(create_criticality_chart(mc["task_stats"]), use_container_width=True)
+    # ── Tab: Cash Flow ────────────────────────────────────────────────
+    with tab_cf:
+        st.subheader("💸 Cash Flow Projection")
+        st.markdown("Weekly and cumulative spending S-curve (Resources + Materials).")
+        
+        boq_df = generate_boq(tasks)
+        cf_data = compute_cash_flow(result["schedule"], boq_df, result["makespan"])
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Project Cost", f"₹{cf_data['total_project_cost']:,.0f}")
+        c2.metric("Peak Weekly Spend", f"₹{cf_data['peak_weekly_spend']:,.0f}")
+        c3.metric("Peak Spend Week", f"Week {cf_data['peak_week']}")
+        
+        st.plotly_chart(create_cash_flow_chart(cf_data), use_container_width=True)
 
-        st.subheader("Per-Task PERT Statistics")
-        st.dataframe(mc["task_stats"], use_container_width=True, hide_index=True)
+    # ── Tab: Equipment Utilization ────────────────────────────────────
+    with tab_equip:
+        st.subheader("🚜 Equipment Utilization & Maintenance")
+        st.markdown("Track heavy machinery operating hours, idle time, and maintenance schedules.")
+        
+        # Calculate resource usage per week
+        resource_usage_timeline = {}
+        for w in range(result["makespan"]):
+            resource_usage_timeline[w] = {}
+        for s in result["schedule"]:
+            for w in range(s["start_week"], s["end_week"]):
+                for res, qty in s["resources"].items():
+                    resource_usage_timeline[w][res] = resource_usage_timeline[w].get(res, 0) + qty
+                    
+        equip_df = compute_equipment_utilization(
+            result["schedule"], resource_usage_timeline, adjusted_caps, result["makespan"]
+        )
+        
+        st.plotly_chart(create_equipment_utilization_chart(equip_df), use_container_width=True)
+        st.dataframe(equip_df, use_container_width=True, hide_index=True)
 
-    # ── Tab: Earned Value Management ──────────────────────────────────
-    with tab_evm:
-        st.subheader("📈 Earned Value Management (EVM)")
-        st.markdown("S-Curve analysis with CPI, SPI, EAC, ETC indicators.")
-
-        with st.spinner("Computing EVM metrics..."):
-            evm_data = compute_evm(
-                result["schedule"], result["makespan"],
-                progress_pct=evm_progress / 100, cost_variance_factor=evm_cost_var,
-            )
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("CPI", f"{evm_data['CPI']}", delta=evm_data["cost_status"])
-        c2.metric("SPI", f"{evm_data['SPI']}", delta=evm_data["schedule_status"])
-        c3.metric("EAC", f"₹{evm_data['EAC']:,.0f}")
-        c4.metric("BAC", f"₹{evm_data['BAC']:,.0f}")
-
-        st.plotly_chart(create_evm_scurve(evm_data), use_container_width=True)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Cost Variance (CV)", f"₹{evm_data['CV']:,.0f}")
-        c2.metric("Schedule Variance (SV)", f"₹{evm_data['SV']:,.0f}")
-        c3.metric("Estimate to Complete (ETC)", f"₹{evm_data['ETC']:,.0f}")
-        c4.metric("Variance at Completion (VAC)", f"₹{evm_data['VAC']:,.0f}")
-
-        st.subheader("📖 EVM Glossary")
-        st.markdown("""
-        | Metric | Formula | Meaning |
-        |---|---|---|
-        | **CPI** | EV / AC | Cost efficiency (>1 = under budget) |
-        | **SPI** | EV / PV | Schedule efficiency (>1 = ahead) |
-        | **EAC** | BAC / CPI | Estimated total cost at completion |
-        | **ETC** | EAC − AC | Remaining cost to finish |
-        | **VAC** | BAC − EAC | Expected budget surplus/deficit |
-        """)
+    # ── Tab: Contractor Payments ──────────────────────────────────────
+    with tab_pay:
+        st.subheader("💳 Contractor Payment Milestones")
+        st.markdown("Progress-linked payment schedule (NHAI standard).")
+        
+        payment_df, total_value = compute_payment_schedule(result["schedule"])
+        st.metric("Estimated Contract Value (with overheads & profit)", f"₹{total_value:,.0f}")
+        st.plotly_chart(create_payment_chart(payment_df), use_container_width=True)
+        st.dataframe(payment_df, use_container_width=True, hide_index=True)
 
     # ── Tab: Schedule Crashing ────────────────────────────────────────
     with tab_crash:
@@ -683,19 +697,19 @@ else:
         st.markdown("### 📊 Smart Scheduling")
         st.markdown("OR-Tools CP-SAT solver for resource-constrained scheduling with Critical Path analysis")
     with col2:
-        st.markdown("### 🤖 AI Delay Prediction")
-        st.markdown("Gradient Boosting model predicts delay risk using weather, complexity & resource data")
+        st.markdown("### 🧱 Bill of Quantities")
+        st.markdown("Material requirement planning and cost estimation")
     with col3:
-        st.markdown("### 🔧 What-If Analysis")
-        st.markdown("Simulate labor shortages, equipment failures and see the impact in real-time")
+        st.markdown("### 💸 Cash Flow & Payments")
+        st.markdown("Weekly spending S-curves and milestone-based payment schedules")
 
     col4, col5, col6 = st.columns(3)
     with col4:
-        st.markdown("### 🎲 Monte Carlo Simulation")
-        st.markdown("PERT distributions + 1000 simulations → P50/P80/P90 confidence intervals")
+        st.markdown("### 🚜 Equipment Management")
+        st.markdown("Track heavy machinery utilization, idle time, and maintenance schedules")
     with col5:
-        st.markdown("### 📈 Earned Value Management")
-        st.markdown("S-Curve, CPI, SPI, EAC — full EVM dashboard for project cost & schedule control")
+        st.markdown("### ⏳ Float Analysis")
+        st.markdown("Detailed breakdown of Total Float and Free Float to identify schedule flexibility")
     with col6:
         st.markdown("### ⚡ Schedule Crashing")
         st.markdown("Cost-time tradeoff analysis to accelerate critical path tasks")

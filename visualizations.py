@@ -715,3 +715,125 @@ def create_map_view(tasks, schedule=None) -> go.Figure:
         height=550, margin=dict(l=0, r=0, t=40, b=0),
     )
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Construction PM Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_float_chart(float_df) -> go.Figure:
+    """Horizontal bar chart of Total Float per task, colored by criticality."""
+    df = float_df.sort_values("total_float", ascending=True)
+    colors = []
+    for _, r in df.iterrows():
+        if r["total_float"] == 0:
+            colors.append("#e74c3c")
+        elif r["total_float"] <= 2:
+            colors.append("#f39c12")
+        elif r["total_float"] <= 5:
+            colors.append("#27ae60")
+        else:
+            colors.append("#3498db")
+
+    fig = go.Figure(go.Bar(
+        x=df["total_float"], y=df["task_name"], orientation="h",
+        marker_color=colors,
+        hovertemplate="%{y}<br>Total Float: %{x} weeks<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Float / Slack Analysis — Total Float per Task",
+        xaxis_title="Total Float (weeks)",
+        height=max(450, len(df) * 25),
+    )
+    return fig
+
+
+def create_cash_flow_chart(cf_data: Dict) -> go.Figure:
+    """Stacked area for weekly spend + line for cumulative (S-curve)."""
+    weeks = cf_data["weeks"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=weeks, y=cf_data["weekly_resource"], name="Resource Cost",
+        marker_color="#3498db", opacity=0.7,
+    ))
+    fig.add_trace(go.Bar(
+        x=weeks, y=cf_data["weekly_material"], name="Material Cost",
+        marker_color="#e67e22", opacity=0.7,
+    ))
+    fig.add_trace(go.Scatter(
+        x=weeks, y=cf_data["cumulative"], name="Cumulative (S-Curve)",
+        mode="lines", line=dict(color="#2c3e50", width=3),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Cash Flow Projection — Weekly Spend & Cumulative S-Curve",
+        xaxis_title="Project Week",
+        yaxis=dict(title="Weekly Cost (₹)", side="left"),
+        yaxis2=dict(title="Cumulative (₹)", side="right", overlaying="y"),
+        barmode="stack", height=450, legend=dict(x=0.01, y=0.99),
+    )
+    return fig
+
+
+def create_equipment_utilization_chart(equip_df) -> go.Figure:
+    """Bar chart of equipment utilization % with maintenance status."""
+    colors = ["#e74c3c" if u > 85 else ("#f39c12" if u > 60 else "#27ae60")
+              for u in equip_df["utilization_%"]]
+    fig = go.Figure(go.Bar(
+        x=equip_df["equipment"], y=equip_df["utilization_%"],
+        marker_color=colors, text=equip_df["utilization_%"],
+        texttemplate="%{text:.0f}%", textposition="auto",
+    ))
+    fig.update_layout(
+        title="Equipment Utilization Report",
+        xaxis_title="Equipment", yaxis_title="Utilization %",
+        height=420, yaxis=dict(range=[0, 100]),
+    )
+    return fig
+
+
+def create_boq_cost_chart(boq_df) -> go.Figure:
+    """Horizontal bar chart of top materials by cost."""
+    material_costs = boq_df[boq_df["total_cost_inr"] > 0].groupby("material")["total_cost_inr"].sum()
+    material_costs = material_costs.sort_values(ascending=True).tail(15)
+
+    fig = go.Figure(go.Bar(
+        x=material_costs.values,
+        y=material_costs.index,
+        orientation="h",
+        marker_color="#8e44ad",
+        hovertemplate="%{y}: ₹%{x:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Bill of Quantities — Top Materials by Cost",
+        xaxis_title="Total Cost (₹)", height=max(400, len(material_costs) * 30),
+    )
+    return fig
+
+
+def create_payment_chart(payment_df) -> go.Figure:
+    """Bar chart of payment milestones with cumulative line."""
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=payment_df["milestone"],
+        y=payment_df["payment_amount_inr"],
+        name="Payment Amount",
+        marker_color="#27ae60",
+        text=[f"₹{v:,.0f}" for v in payment_df["payment_amount_inr"]],
+        textposition="auto",
+    ))
+    fig.add_trace(go.Scatter(
+        x=payment_df["milestone"],
+        y=payment_df["cumulative_inr"],
+        name="Cumulative",
+        mode="lines+markers",
+        line=dict(color="#e74c3c", width=3),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Contractor Payment Schedule",
+        yaxis=dict(title="Payment (₹)", side="left"),
+        yaxis2=dict(title="Cumulative (₹)", side="right", overlaying="y"),
+        height=420,
+    )
+    return fig
