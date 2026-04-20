@@ -479,3 +479,361 @@ def create_drift_chart(drift_df: pd.DataFrame) -> go.Figure:
         height=420,
     )
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Monte Carlo Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_monte_carlo_histogram(makespans, percentiles: Dict) -> go.Figure:
+    """Histogram of simulated makespans with percentile lines."""
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=makespans, nbinsx=40, marker_color="#3498db",
+        opacity=0.75, name="Simulated Makespans",
+    ))
+    colors = {"P50": "#27ae60", "P80": "#f39c12", "P90": "#e74c3c", "P95": "#8e44ad"}
+    for label, col in colors.items():
+        val = percentiles[label]
+        fig.add_vline(x=val, line_dash="dash", line_color=col,
+                      annotation_text=f"{label}: {val}w", annotation_position="top")
+    fig.update_layout(
+        title="Monte Carlo Simulation — Project Completion Distribution",
+        xaxis_title="Makespan (weeks)", yaxis_title="Frequency", height=420,
+    )
+    return fig
+
+
+def create_criticality_chart(task_stats) -> go.Figure:
+    """Horizontal bar chart of criticality index per task."""
+    df = task_stats.sort_values("criticality_%", ascending=True)
+    colors = ["#e74c3c" if v > 60 else ("#f39c12" if v > 30 else "#27ae60")
+              for v in df["criticality_%"]]
+    fig = go.Figure(go.Bar(
+        x=df["criticality_%"], y=df["task_name"], orientation="h",
+        marker_color=colors,
+        hovertemplate="%{y}: %{x:.1f}% critical<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Criticality Index — % of Simulations on Critical Path",
+        xaxis_title="Criticality (%)", height=max(450, len(df) * 25),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# EVM Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_evm_scurve(evm_data: Dict) -> go.Figure:
+    """S-Curve: PV, EV, AC over project weeks."""
+    weeks = evm_data["weeks"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=weeks, y=evm_data["pv_cumulative"],
+                             mode="lines", name="Planned Value (PV)",
+                             line=dict(color="#3498db", width=3)))
+    fig.add_trace(go.Scatter(x=weeks, y=evm_data["ev_cumulative"],
+                             mode="lines", name="Earned Value (EV)",
+                             line=dict(color="#27ae60", width=3)))
+    fig.add_trace(go.Scatter(x=weeks, y=evm_data["ac_cumulative"],
+                             mode="lines", name="Actual Cost (AC)",
+                             line=dict(color="#e74c3c", width=3, dash="dot")))
+    fig.add_vline(x=evm_data["current_week"], line_dash="dash",
+                  line_color="grey", annotation_text="Current Week")
+    fig.update_layout(
+        title="Earned Value Management — S-Curve",
+        xaxis_title="Project Week", yaxis_title="Cumulative Cost (₹)", height=450,
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Crashing Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_crash_tradeoff_chart(tradeoff_df) -> go.Figure:
+    """Cost-Time tradeoff curve."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=tradeoff_df["makespan"], y=tradeoff_df["crash_cost"],
+        mode="lines+markers", name="Crash Cost",
+        line=dict(color="#e74c3c", width=3),
+        marker=dict(size=10),
+        text=tradeoff_df["crashed_task"],
+        hovertemplate="Makespan: %{x}w<br>Crash Cost: ₹%{y:,.0f}<br>Crashed: %{text}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Schedule Crashing — Cost-Time Tradeoff",
+        xaxis_title="Makespan (weeks)", yaxis_title="Cumulative Crash Cost (₹)",
+        height=420, xaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DAG Network Graph
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_dag_chart(tasks, schedule=None) -> go.Figure:
+    """Task dependency network graph using layered layout."""
+    from data_generator import DEPENDENCY_MAP
+
+    # Compute layers via topological ordering (BFS by depth)
+    n = len(tasks)
+    depth = [0] * n
+    for t in tasks:
+        for p in t.predecessors:
+            depth[t.id] = max(depth[t.id], depth[p] + 1)
+
+    # Position nodes: x = depth, y = spread within layer
+    layer_counts = {}
+    for i in range(n):
+        d = depth[i]
+        layer_counts[d] = layer_counts.get(d, 0) + 1
+
+    layer_idx = {}
+    for i in range(n):
+        d = depth[i]
+        layer_idx[i] = layer_idx.get(d, -1) if d not in layer_idx else layer_idx[d]
+    # Re-compute y positions
+    layer_pos = {d: 0 for d in layer_counts}
+    x_pos, y_pos = {}, {}
+    for i in range(n):
+        d = depth[i]
+        total_in_layer = layer_counts[d]
+        x_pos[i] = d
+        y_pos[i] = layer_pos[d] - total_in_layer / 2
+        layer_pos[d] += 1
+
+    # Determine critical status
+    is_crit = {}
+    if schedule:
+        for s in schedule:
+            is_crit[s["task_id"]] = s["is_critical"]
+
+    # Draw edges
+    edge_x, edge_y = [], []
+    for t in tasks:
+        for p in t.predecessors:
+            edge_x += [x_pos[p], x_pos[t.id], None]
+            edge_y += [y_pos[p], y_pos[t.id], None]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=edge_x, y=edge_y, mode="lines",
+        line=dict(width=1.5, color="#999"), hoverinfo="none",
+    ))
+
+    # Nodes
+    node_colors = []
+    for t in tasks:
+        if is_crit.get(t.id, t.is_critical):
+            node_colors.append("#e74c3c")
+        else:
+            node_colors.append("#3498db")
+
+    node_text = [f"{t.name[:25]}" for t in tasks]
+    hover_text = [f"<b>{t.name}</b><br>Duration: {t.duration_weeks}w<br>"
+                  f"ES: {t.earliest_start} | LS: {t.latest_start}<br>"
+                  f"Critical: {'Yes' if is_crit.get(t.id, t.is_critical) else 'No'}"
+                  for t in tasks]
+
+    fig.add_trace(go.Scatter(
+        x=[x_pos[i] for i in range(n)],
+        y=[y_pos[i] for i in range(n)],
+        mode="markers+text", text=node_text,
+        textposition="top center", textfont=dict(size=8),
+        hovertext=hover_text, hoverinfo="text",
+        marker=dict(size=18, color=node_colors, line=dict(width=2, color="white")),
+    ))
+
+    fig.update_layout(
+        title="Task Dependency Network (DAG) — Red = Critical Path",
+        showlegend=False, height=550,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title="Dependency Depth"),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Geospatial Map View
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_map_view(tasks, schedule=None) -> go.Figure:
+    """Plot tasks along a simulated NH-48 route on a map."""
+    # Simulated chainage points along NH-48 (Delhi → Jaipur stretch)
+    route_points = [
+        (28.6139, 77.2090, 0),    # Delhi
+        (28.4595, 77.0266, 25),   # Gurgaon
+        (28.2500, 76.8500, 50),
+        (28.0500, 76.6500, 75),
+        (27.8000, 76.5000, 100),
+        (27.5500, 76.3500, 125),
+        (27.3000, 76.2000, 150),
+        (27.0000, 76.0000, 175),
+        (26.9124, 75.7873, 200),  # Jaipur
+    ]
+
+    n = len(tasks)
+    lats, lons, labels, colors, sizes = [], [], [], [], []
+
+    for i, t in enumerate(tasks):
+        # Distribute tasks along the route
+        route_idx = min(int(i / n * len(route_points)), len(route_points) - 1)
+        lat, lon, km = route_points[route_idx]
+        # Add small offset so tasks don't overlap
+        lat += (i % 3 - 1) * 0.02
+        lon += (i % 2) * 0.015
+
+        crit = False
+        if schedule:
+            for s in schedule:
+                if s["task_id"] == t.id:
+                    crit = s["is_critical"]
+                    break
+        else:
+            crit = t.is_critical
+
+        lats.append(lat)
+        lons.append(lon)
+        labels.append(f"{t.name[:30]} (Km {km})")
+        colors.append("#e74c3c" if crit else "#3498db")
+        sizes.append(15 if crit else 10)
+
+    fig = go.Figure(go.Scattermapbox(
+        lat=lats, lon=lons, mode="markers+text",
+        marker=dict(size=sizes, color=colors),
+        text=[t.name[:20] for t in tasks],
+        textposition="top right", textfont=dict(size=8),
+        hovertext=labels, hoverinfo="text",
+    ))
+    fig.update_layout(
+        title="Geospatial View — Tasks Along NH-48 Route",
+        mapbox=dict(style="open-street-map",
+                    center=dict(lat=27.8, lon=76.5), zoom=6.5),
+        height=550, margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Construction PM Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+def create_float_chart(float_df) -> go.Figure:
+    """Horizontal bar chart of Total Float per task, colored by criticality."""
+    df = float_df.sort_values("total_float", ascending=True)
+    colors = []
+    for _, r in df.iterrows():
+        if r["total_float"] == 0:
+            colors.append("#e74c3c")
+        elif r["total_float"] <= 2:
+            colors.append("#f39c12")
+        elif r["total_float"] <= 5:
+            colors.append("#27ae60")
+        else:
+            colors.append("#3498db")
+
+    fig = go.Figure(go.Bar(
+        x=df["total_float"], y=df["task_name"], orientation="h",
+        marker_color=colors,
+        hovertemplate="%{y}<br>Total Float: %{x} weeks<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Float / Slack Analysis — Total Float per Task",
+        xaxis_title="Total Float (weeks)",
+        height=max(450, len(df) * 25),
+    )
+    return fig
+
+
+def create_cash_flow_chart(cf_data: Dict) -> go.Figure:
+    """Stacked area for weekly spend + line for cumulative (S-curve)."""
+    weeks = cf_data["weeks"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=weeks, y=cf_data["weekly_resource"], name="Resource Cost",
+        marker_color="#3498db", opacity=0.7,
+    ))
+    fig.add_trace(go.Bar(
+        x=weeks, y=cf_data["weekly_material"], name="Material Cost",
+        marker_color="#e67e22", opacity=0.7,
+    ))
+    fig.add_trace(go.Scatter(
+        x=weeks, y=cf_data["cumulative"], name="Cumulative (S-Curve)",
+        mode="lines", line=dict(color="#2c3e50", width=3),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Cash Flow Projection — Weekly Spend & Cumulative S-Curve",
+        xaxis_title="Project Week",
+        yaxis=dict(title="Weekly Cost (₹)", side="left"),
+        yaxis2=dict(title="Cumulative (₹)", side="right", overlaying="y"),
+        barmode="stack", height=450, legend=dict(x=0.01, y=0.99),
+    )
+    return fig
+
+
+def create_equipment_utilization_chart(equip_df) -> go.Figure:
+    """Bar chart of equipment utilization % with maintenance status."""
+    colors = ["#e74c3c" if u > 85 else ("#f39c12" if u > 60 else "#27ae60")
+              for u in equip_df["utilization_%"]]
+    fig = go.Figure(go.Bar(
+        x=equip_df["equipment"], y=equip_df["utilization_%"],
+        marker_color=colors, text=equip_df["utilization_%"],
+        texttemplate="%{text:.0f}%", textposition="auto",
+    ))
+    fig.update_layout(
+        title="Equipment Utilization Report",
+        xaxis_title="Equipment", yaxis_title="Utilization %",
+        height=420, yaxis=dict(range=[0, 100]),
+    )
+    return fig
+
+
+def create_boq_cost_chart(boq_df) -> go.Figure:
+    """Horizontal bar chart of top materials by cost."""
+    material_costs = boq_df[boq_df["total_cost_inr"] > 0].groupby("material")["total_cost_inr"].sum()
+    material_costs = material_costs.sort_values(ascending=True).tail(15)
+
+    fig = go.Figure(go.Bar(
+        x=material_costs.values,
+        y=material_costs.index,
+        orientation="h",
+        marker_color="#8e44ad",
+        hovertemplate="%{y}: ₹%{x:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Bill of Quantities — Top Materials by Cost",
+        xaxis_title="Total Cost (₹)", height=max(400, len(material_costs) * 30),
+    )
+    return fig
+
+
+def create_payment_chart(payment_df) -> go.Figure:
+    """Bar chart of payment milestones with cumulative line."""
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=payment_df["milestone"],
+        y=payment_df["payment_amount_inr"],
+        name="Payment Amount",
+        marker_color="#27ae60",
+        text=[f"₹{v:,.0f}" for v in payment_df["payment_amount_inr"]],
+        textposition="auto",
+    ))
+    fig.add_trace(go.Scatter(
+        x=payment_df["milestone"],
+        y=payment_df["cumulative_inr"],
+        name="Cumulative",
+        mode="lines+markers",
+        line=dict(color="#e74c3c", width=3),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Contractor Payment Schedule",
+        yaxis=dict(title="Payment (₹)", side="left"),
+        yaxis2=dict(title="Cumulative (₹)", side="right", overlaying="y"),
+        height=420,
+    )
+    return fig

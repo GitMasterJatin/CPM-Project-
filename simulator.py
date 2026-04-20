@@ -235,9 +235,9 @@ def run_comparison(
             "CPM Ideal (weeks)": res["cpm_makespan"],
             "Delay vs Ideal": res["makespan"] - res["cpm_makespan"] if res["makespan"] > 0 else "N/A",
             "Total Cost (₹)": f"₹{res['cost']['total_cost']:,.0f}" if res["cost"]["total_cost"] > 0 else "N/A",
-            "Predicted Delay (weeks)": res["total_predicted_delay"],
-            "High-Risk Tasks": res["high_risk_tasks"],
-            "Avg External Risk": res["avg_external_risk"],
+            "Predicted Delay (weeks)": res.get("total_predicted_delay", 0),
+            "High-Risk Tasks": res.get("high_risk_tasks", 0),
+            "Avg External Risk": res.get("avg_external_risk", 0),
             "Constraint Health": res["constraint_report"]["summary"]["health"] if res["constraint_report"] else "N/A",
             "Penalties (₹)": f"₹{res['constraint_report']['summary']['total_penalties_inr']:,.0f}" if res["constraint_report"] else "N/A",
         }

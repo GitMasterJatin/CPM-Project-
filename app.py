@@ -5,6 +5,7 @@ Main entry point: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import io
 
 from config import RESOURCE_POOLS, OBJECTIVE_WEIGHTS
 from data_generator import generate_project_tasks, tasks_to_dataframe
@@ -31,6 +32,12 @@ from ml_quality import (
     compute_shap_explanations, explain_single_prediction,
     detect_data_drift, simulate_drift_scenario,
 )
+from crashing import compute_crash_tradeoff
+from construction_pm import (
+    compute_float_analysis, generate_boq, boq_summary,
+    compute_cash_flow, compute_equipment_utilization,
+    compute_payment_schedule,
+)
 from visualizations import (
     create_gantt_chart_bar,
     create_resource_heatmap,
@@ -48,6 +55,14 @@ from visualizations import (
     create_shap_bar_chart,
     create_shap_waterfall,
     create_drift_chart,
+    create_crash_tradeoff_chart,
+    create_dag_chart,
+    create_map_view,
+    create_float_chart,
+    create_cash_flow_chart,
+    create_equipment_utilization_chart,
+    create_boq_cost_chart,
+    create_payment_chart,
 )
 
 # ─── Page Config ─────────────────────────────────────────────────────
@@ -120,6 +135,12 @@ with st.sidebar:
         format_func=lambda k: SCENARIO_LIBRARY[k].name,
     )
 
+
+    st.subheader("📤 Data Import")
+    uploaded_file = st.file_uploader("Upload Task CSV", type=["csv"])
+    if uploaded_file:
+        st.success(f"Loaded: {uploaded_file.name}")
+
     run_btn = st.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
 # ─── Main Logic ──────────────────────────────────────────────────────
@@ -167,9 +188,11 @@ if run_btn or "schedule" in st.session_state:
         )
 
     # ─── Dashboard Tabs ─────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab_ml, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab_ml, tab5, tab6, tab7, tab_float, tab_boq, tab_cf, tab_equip, tab_pay, tab_crash, tab_map, tab8 = st.tabs([
         "📊 Schedule", "🔧 Resources", "💰 Cost", "🤖 AI Risk",
-        "🧪 ML Quality", "🌦️ Live Data", "📏 Constraints", "🔬 Simulator", "📋 Data",
+        "🧪 ML Quality", "🌦️ Live Data", "📏 Constraints", "🔬 Simulator",
+        "⏳ Float", "🧱 BOQ", "💸 Cash Flow", "🚜 Equip", "💳 Payments",
+        "⚡ Crashing", "🗺️ Map", "📋 Data",
     ])
 
     # ── Tab 1: Schedule ──────────────────────────────────────────────
@@ -192,6 +215,13 @@ if run_btn or "schedule" in st.session_state:
             pd.DataFrame(critical_tasks)[["task_name", "start_week", "end_week", "duration"]],
             use_container_width=True,
             hide_index=True,
+        )
+
+        # DAG Network Graph
+        st.subheader("🕸️ Task Dependency Network (DAG)")
+        st.plotly_chart(
+            create_dag_chart(tasks, result["schedule"]),
+            use_container_width=True,
         )
 
     # ── Tab 2: Resources ─────────────────────────────────────────────
@@ -538,7 +568,109 @@ if run_btn or "schedule" in st.session_state:
                 })
             st.dataframe(pd.DataFrame(lib_data), use_container_width=True, hide_index=True)
 
-    # ── Tab 8: Raw Data ──────────────────────────────────────────────
+
+    # ── Tab: Float Analysis ──────────────────────────────────────────
+    with tab_float:
+        st.subheader("⏳ Float / Slack Analysis")
+        st.markdown("Identify schedule flexibility and near-critical tasks.")
+        float_df = compute_float_analysis(tasks, result["schedule"])
+        st.plotly_chart(create_float_chart(float_df), use_container_width=True)
+        st.dataframe(float_df, use_container_width=True, hide_index=True)
+
+    # ── Tab: BOQ ──────────────────────────────────────────────────────
+    with tab_boq:
+        st.subheader("🧱 Bill of Quantities (BOQ)")
+        boq_df = generate_boq(tasks)
+        boq_stats = boq_summary(boq_df)
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Material Cost", f"₹{boq_stats['total_material_cost']:,.0f}")
+        c2.metric("Unique Materials", boq_stats["unique_materials"])
+        c3.metric("Tasks with Materials", boq_stats["tasks_with_materials"])
+        
+        st.plotly_chart(create_boq_cost_chart(boq_df), use_container_width=True)
+        st.dataframe(boq_df, use_container_width=True, hide_index=True)
+
+    # ── Tab: Cash Flow ────────────────────────────────────────────────
+    with tab_cf:
+        st.subheader("💸 Cash Flow Projection")
+        st.markdown("Weekly and cumulative spending S-curve (Resources + Materials).")
+        
+        boq_df = generate_boq(tasks)
+        cf_data = compute_cash_flow(result["schedule"], boq_df, result["makespan"])
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Project Cost", f"₹{cf_data['total_project_cost']:,.0f}")
+        c2.metric("Peak Weekly Spend", f"₹{cf_data['peak_weekly_spend']:,.0f}")
+        c3.metric("Peak Spend Week", f"Week {cf_data['peak_week']}")
+        
+        st.plotly_chart(create_cash_flow_chart(cf_data), use_container_width=True)
+
+    # ── Tab: Equipment Utilization ────────────────────────────────────
+    with tab_equip:
+        st.subheader("🚜 Equipment Utilization & Maintenance")
+        st.markdown("Track heavy machinery operating hours, idle time, and maintenance schedules.")
+        
+        # Calculate resource usage per week
+        resource_usage_timeline = {}
+        for w in range(result["makespan"]):
+            resource_usage_timeline[w] = {}
+        for s in result["schedule"]:
+            for w in range(s["start_week"], s["end_week"]):
+                for res, qty in s["resources"].items():
+                    resource_usage_timeline[w][res] = resource_usage_timeline[w].get(res, 0) + qty
+                    
+        equip_df = compute_equipment_utilization(
+            result["schedule"], resource_usage_timeline, adjusted_caps, result["makespan"]
+        )
+        
+        st.plotly_chart(create_equipment_utilization_chart(equip_df), use_container_width=True)
+        st.dataframe(equip_df, use_container_width=True, hide_index=True)
+
+    # ── Tab: Contractor Payments ──────────────────────────────────────
+    with tab_pay:
+        st.subheader("💳 Contractor Payment Milestones")
+        st.markdown("Progress-linked payment schedule (NHAI standard).")
+        
+        payment_df, total_value = compute_payment_schedule(result["schedule"])
+        st.metric("Estimated Contract Value (with overheads & profit)", f"₹{total_value:,.0f}")
+        st.plotly_chart(create_payment_chart(payment_df), use_container_width=True)
+        st.dataframe(payment_df, use_container_width=True, hide_index=True)
+
+    # ── Tab: Schedule Crashing ────────────────────────────────────────
+    with tab_crash:
+        st.subheader("⚡ Schedule Crashing — Cost-Time Tradeoff")
+        st.markdown("Progressively crash critical tasks to reduce makespan at additional cost.")
+
+        with st.spinner("Computing crash tradeoff..."):
+            crash = compute_crash_tradeoff(max_steps=10)
+
+        if len(crash["tradeoff_curve"]) > 0:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Baseline Makespan", f"{crash['base_makespan']} weeks")
+            c2.metric("Best Crashed Makespan", f"{crash['best_makespan']} weeks")
+            c3.metric("Total Crash Cost", f"₹{crash['total_crash_cost']:,.0f}")
+
+            st.plotly_chart(create_crash_tradeoff_chart(crash["tradeoff_curve"]), use_container_width=True)
+
+            st.subheader("Crash Steps")
+            st.dataframe(crash["tradeoff_curve"], use_container_width=True, hide_index=True)
+
+            st.subheader("Crash Plan — Available Tasks")
+            st.dataframe(crash["crash_plan"], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Could not compute crash tradeoff.")
+
+    # ── Tab: Map View ────────────────────────────────────────────────
+    with tab_map:
+        st.subheader("🗺️ Geospatial View — NH-48 Route")
+        st.markdown("Tasks plotted along the highway alignment. Red = Critical Path.")
+        st.plotly_chart(
+            create_map_view(tasks, result["schedule"]),
+            use_container_width=True,
+        )
+
+    # ── Tab: Raw Data ────────────────────────────────────────────────
     with tab8:
         st.subheader("Task Details")
         st.dataframe(tasks_to_dataframe(tasks), use_container_width=True, hide_index=True)
@@ -549,6 +681,13 @@ if run_btn or "schedule" in st.session_state:
         st.subheader("Risk Predictions")
         st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
+        # CSV Export
+        st.subheader("📥 Export Data")
+        csv_buf = io.StringIO()
+        pd.DataFrame(result["schedule"]).to_csv(csv_buf, index=False)
+        st.download_button("Download Schedule CSV", csv_buf.getvalue(),
+                           file_name="roadopt_schedule.csv", mime="text/csv")
+
 else:
     # Landing page
     st.info("👈 Configure your project in the sidebar and click **Run Optimization**")
@@ -558,19 +697,19 @@ else:
         st.markdown("### 📊 Smart Scheduling")
         st.markdown("OR-Tools CP-SAT solver for resource-constrained scheduling with Critical Path analysis")
     with col2:
-        st.markdown("### 🤖 AI Delay Prediction")
-        st.markdown("Gradient Boosting model predicts delay risk using weather, complexity & resource data")
+        st.markdown("### 🧱 Bill of Quantities")
+        st.markdown("Material requirement planning and cost estimation")
     with col3:
-        st.markdown("### 🔧 What-If Analysis")
-        st.markdown("Simulate labor shortages, equipment failures and see the impact in real-time")
+        st.markdown("### 💸 Cash Flow & Payments")
+        st.markdown("Weekly spending S-curves and milestone-based payment schedules")
 
     col4, col5, col6 = st.columns(3)
     with col4:
-        st.markdown("### 🌦️ Live Data Connectors")
-        st.markdown("Weather, traffic, holidays & strike data feed into project risk scoring")
+        st.markdown("### 🚜 Equipment Management")
+        st.markdown("Track heavy machinery utilization, idle time, and maintenance schedules")
     with col5:
-        st.markdown("### 📏 Business Constraints")
-        st.markdown("Driver shift limits, fuel budgets, time windows & priority milestone tracking")
+        st.markdown("### ⏳ Float Analysis")
+        st.markdown("Detailed breakdown of Total Float and Free Float to identify schedule flexibility")
     with col6:
-        st.markdown("### 🔬 Scenario Simulator")
-        st.markdown("Compare 7+ pre-built scenarios: monsoon, labor crisis, budget crunch, worst-case & more")
+        st.markdown("### ⚡ Schedule Crashing")
+        st.markdown("Cost-time tradeoff analysis to accelerate critical path tasks")
